@@ -6,62 +6,85 @@
 # -a, --author       to filter by author
 # -s, --since        to select start date
 # -u, --until        to select end date
+# -o, --output       output file (default: CHANGELOG.md, "-" for stdout)
+# -h, --help         show usage
+
+usage () {
+  echo "Usage: $(basename "$0") [-a=AUTHOR] [-s=SINCE] [-u=UNTIL] [-o=FILE]"
+  echo
+  echo "  -a, --author=AUTHOR   filter commits by author"
+  echo "  -s, --since=DATE      select start date (e.g. 2024-01-01)"
+  echo "  -u, --until=DATE      select end date (e.g. 2024-12-31)"
+  echo "  -o, --output=FILE     output file (default: CHANGELOG.md, \"-\" for stdout)"
+  echo "  -h, --help            show this help"
+}
 
 git-log-to-markdown () {
-  local NEXT=$(date +%F)
-
-  local RED="\x1B[31m"
-  local YELLOW="\x1B[32m"
-  local BLUE="\x1B[34m"
-  local RESET="\x1B[0m"
-
-  local SINCE="1970-01-01"
-  local UNTIL=$NEXT
-
+  local AUTHOR=""
+  local SINCE=""
+  local UNTIL=""
+  local OUTPUT="CHANGELOG.md"
 
   for i in "$@"
   do
   case $i in
     -a=*|--author=*)
-    local AUTHOR="${i#*=}"
-    shift
+    AUTHOR="${i#*=}"
     ;;
     -s=*|--since=*)
     SINCE="${i#*=}"
-    shift
     ;;
     -u=*|--until=*)
     UNTIL="${i#*=}"
-    shift
+    ;;
+    -o=*|--output=*)
+    OUTPUT="${i#*=}"
+    ;;
+    -h|--help)
+    usage
+    return 0
     ;;
     *)
-      # unknown option
+    echo "Unknown option: $i" >&2
+    usage >&2
+    return 1
     ;;
   esac
   done
 
-  local LOG_FORMAT=" %Cgreen*%Creset %s"
-
-  if [ -z "$AUTHOR" ]
+  if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1
   then
-    LOG_FORMAT="$LOG_FORMAT %Cblue(%an)%Creset"
-  else
-    echo "# Gitlog"
+    echo "Error: not inside a git repository" >&2
+    return 1
   fi
 
-  git log --no-merges --author="${AUTHOR}" --since="${SINCE}" --until="${UNTIL}" --format="%cd" --date=short | sort -u | while read DATE ; do
+  local GIT_ARGS=(--no-merges --reverse --date=short-local)
+  [ -n "$AUTHOR" ] && GIT_ARGS+=(--author="$AUTHOR")
+  [ -n "$SINCE" ] && GIT_ARGS+=(--since="$SINCE 00:00:00")
+  [ -n "$UNTIL" ] && GIT_ARGS+=(--until="$UNTIL 23:59:59")
 
-    local GIT_PAGER=$(git log --no-merges --reverse --format="${LOG_FORMAT} - %h" --since="${DATE} 00:00:00" --until="${DATE} 23:59:59" --author="${AUTHOR}")
+  local LOG_FORMAT="%cd%x09 * %s"
+  [ -z "$AUTHOR" ] && LOG_FORMAT="$LOG_FORMAT (%an)"
+  LOG_FORMAT="$LOG_FORMAT - %h"
 
-    if [ ! -z "$GIT_PAGER" ]
-    then
-      echo
-      echo -e "## Version $DATE"
-      echo -e "${GIT_PAGER}"
-    fi
+  # one git call: prefix each line with its local date, stable-sort by date
+  # (keeps chronological order within a day) and group under a heading per day
+  local CHANGELOG
+  CHANGELOG=$(git log "${GIT_ARGS[@]}" --format="$LOG_FORMAT" \
+    | sort -s -t $'\t' -k1,1 \
+    | awk -F '\t' '
+        $1 != date { date = $1; printf "\n## Version %s\n", date }
+        { sub(/^[^\t]*\t/, ""); print }
+      ')
 
-  done
-
+  if [ "$OUTPUT" = "-" ]
+  then
+    echo "# Gitlog"
+    echo "$CHANGELOG"
+  else
+    { echo "# Gitlog"; echo "$CHANGELOG"; } > "$OUTPUT"
+    echo "Changelog written to $OUTPUT" >&2
+  fi
 }
 
-git-log-to-markdown "$@" > ./CHANGELOG.md
+git-log-to-markdown "$@"
